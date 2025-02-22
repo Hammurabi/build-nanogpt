@@ -16,7 +16,6 @@ from tqdm import tqdm # pip install tqdm
 
 def modified_tokenizer():
     gpt2 = tiktoken.get_encoding("gpt2")
-    # Define custom tokens and their token IDs
     custom_tokens = ["<|ctx|>", "<|endctx|>", "<|think|>", "<|endthink|>",
                      "<|action|>", "<|endaction|>", '<|recall|>', '<|endrecall|>', '<|code|>', '<|endcode|>',
                      '<|math|>', '<|endmath|>', '<|data|>', '<|enddata|>', '<|value|>', '<|endvalue|>',
@@ -26,7 +25,6 @@ def modified_tokenizer():
         token: gpt2.n_vocab + i for i, token in enumerate(custom_tokens)
     }
 
-    # Create a new Encoding object with extended tokens
     extended_tokenizer = tiktoken.Encoding(
         name="agent",
         pat_str=gpt2._pat_str,
