@@ -14,6 +14,28 @@ import tiktoken
 from datasets import load_dataset # pip install datasets
 from tqdm import tqdm # pip install tqdm
 
+def modified_tokenizer():
+    gpt2 = tiktoken.get_encoding("gpt2")
+    # Define custom tokens and their token IDs
+    custom_tokens = ["<|ctx|>", "<|endctx|>", "<|think|>", "<|endthink|>",
+                     "<|action|>", "<|endaction|>", '<|recall|>', '<|endrecall|>', '<|code|>', '<|endcode|>',
+                     '<|math|>', '<|endmath|>', '<|data|>', '<|enddata|>', '<|value|>', '<|endvalue|>',
+                     '<|observer|>', '<|endobserver|>', '<|critic|>', '<|endcritic|>',
+                     '<|str|>', '<|endstr|>', '<|speak|>', '<|endspeak|>', '<|speech|>', '<|endspeech|>', '<|result|>', '<|endresult|>']
+    custom_token_ids = {
+        token: gpt2.n_vocab + i for i, token in enumerate(custom_tokens)
+    }
+
+    # Create a new Encoding object with extended tokens
+    extended_tokenizer = tiktoken.Encoding(
+        name="agent",
+        pat_str=gpt2._pat_str,
+        mergeable_ranks=gpt2._mergeable_ranks,
+        special_tokens={**gpt2._special_tokens, **custom_token_ids},
+    )
+
+    return extended_tokenizer
+
 # ------------------------------------------
 local_dir = "edu_fineweb10B"
 remote_name = "sample-10BT"
@@ -26,8 +48,10 @@ os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 # download the dataset
 fw = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, split="train")
 
+
+
 # init the tokenizer
-enc = tiktoken.get_encoding("gpt2")
+enc = modified_tokenizer() # tiktoken.get_encoding("gpt2")
 eot = enc._special_tokens['<|endoftext|>'] # end of text token
 def tokenize(doc):
     # tokenizes a single document and returns a numpy array of uint16 tokens
