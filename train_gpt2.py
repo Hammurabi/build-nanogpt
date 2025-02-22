@@ -70,11 +70,11 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024 # max sequence length
+    block_size: int = 2048 # max sequence length
     vocab_size: int = 50257 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
-    n_layer: int = 12 # number of layers
-    n_head: int = 12 # number of heads
-    n_embd: int = 768 # embedding dimension
+    n_layer: int = 20 # number of layers
+    n_head: int = 4 # number of heads
+    n_embd: int = 256 # embedding dimension
 
 class GPT(nn.Module):
 
@@ -205,6 +205,26 @@ class GPT(nn.Module):
 import tiktoken
 import numpy as np
 
+def modified_tokenizer():
+    gpt2 = tiktoken.get_encoding("gpt2")
+    custom_tokens = ["<|ctx|>", "<|endctx|>", "<|think|>", "<|endthink|>",
+                     "<|action|>", "<|endaction|>", '<|recall|>', '<|endrecall|>', '<|code|>', '<|endcode|>',
+                     '<|math|>', '<|endmath|>', '<|data|>', '<|enddata|>', '<|value|>', '<|endvalue|>',
+                     '<|observer|>', '<|endobserver|>', '<|critic|>', '<|endcritic|>',
+                     '<|str|>', '<|endstr|>', '<|speak|>', '<|endspeak|>', '<|speech|>', '<|endspeech|>', '<|result|>', '<|endresult|>']
+    custom_token_ids = {
+        token: gpt2.n_vocab + i for i, token in enumerate(custom_tokens)
+    }
+
+    extended_tokenizer = tiktoken.Encoding(
+        name="agent",
+        pat_str=gpt2._pat_str,
+        mergeable_ranks=gpt2._mergeable_ranks,
+        special_tokens={**gpt2._special_tokens, **custom_token_ids},
+    )
+
+    return extended_tokenizer
+
 def load_tokens(filename):
     npt = np.load(filename)
     npt = npt.astype(np.int32) # added after video
@@ -220,7 +240,7 @@ class DataLoaderLite:
         assert split in {'train', 'val'}
 
         # get the shard filenames
-        data_root = "edu_fineweb10B"
+        data_root = "fineweb10B"
         shards = os.listdir(data_root)
         shards = [s for s in shards if split in s]
         shards = sorted(shards)
@@ -322,8 +342,8 @@ if torch.cuda.is_available():
 enc = tiktoken.get_encoding("gpt2")
 
 total_batch_size = 524288 # 2**19, ~0.5M, in number of tokens
-B = 64 # micro batch size
-T = 1024 # sequence length
+B = 32 # micro batch size
+T = 2048 # sequence length
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 if master_process:
@@ -397,7 +417,7 @@ for step in range(max_steps):
             print(f"validation loss: {val_loss_accum.item():.4f}")
             with open(log_file, "a") as f:
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-            if step > 0 and (step % 5000 == 0 or last_step):
+            if step > 0 and (step % 500 == 0 or last_step):
                 # optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                 checkpoint = {
