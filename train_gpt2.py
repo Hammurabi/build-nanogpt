@@ -70,9 +70,9 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 2048 # max sequence length
+    block_size: int = 1024 # max sequence length
     vocab_size: int = 50257 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
-    n_layer: int = 18 # number of layers
+    n_layer: int = 24 # number of layers
     n_head: int = 4 # number of heads
     n_embd: int = 1152 # embedding dimension
 
@@ -200,6 +200,92 @@ class GPT(nn.Module):
             print(f"using fused AdamW: {use_fused}")
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
+
+    @torch.no_grad()
+    def sample(self, idx, max_new_tokens, temperature=1.0, top_k=None, 
+                top_p=None, typical_p=None, repetition_penalty=1.0, 
+                num_samples=1, device='cuda'):
+        """
+        Enhanced generation with modern sampling techniques
+        
+        Args:
+            idx: input sequence (batch_size, seq_len)
+            max_new_tokens: number of tokens to generate
+            temperature: softmax temperature
+            top_k: top-k filtering
+            top_p: nucleus sampling (0.0-1.0)
+            typical_p: typical sampling (0.0-1.0)
+            repetition_penalty: penalty for repeated tokens (1.0 = no penalty)
+            num_samples: number of parallel samples to generate
+            device: computation device
+            
+        Returns:
+            generated sequence with shape (batch_size * num_samples, seq_len + max_new_tokens)
+        """
+        if num_samples > 1:
+            idx = idx.repeat_interleave(num_samples, dim=0)
+            
+        batch_size, seq_len = idx.shape
+        self.eval()
+        self.to(device)
+        idx = idx.to(device)
+        
+        for _ in range(max_new_tokens):
+            # Crop context if needed
+            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            
+            # Forward pass
+            logits, _ = self(idx_cond)
+            logits = logits[:, -1, :] / temperature
+            
+            # Repetition penalty
+            if repetition_penalty != 1.0:
+                for b in range(batch_size):
+                    unique_tokens = torch.unique(idx_cond[b])
+                    logits[b, unique_tokens] /= repetition_penalty
+            
+            # Top-k filtering
+            if top_k is not None and top_k > 0:
+                top_k = min(top_k, logits.size(-1))
+                indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+                logits[indices_to_remove] = -float('Inf')
+            
+            # Nucleus (top-p) sampling
+            if top_p is not None and top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                
+                # Remove tokens with cumulative probability above threshold
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                
+                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                logits[indices_to_remove] = -float('Inf')
+            
+            # Typical sampling
+            if typical_p is not None and typical_p < 1.0:
+                entropy = -(logits.softmax(-1) * logits.log_softmax(-1)).nansum(-1, keepdim=True)
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                sorted_probs = sorted_logits.softmax(-1)
+                
+                # Calculate typical distribution threshold
+                cum_probs = torch.cumsum(sorted_probs, dim=-1)
+                sorted_indices_to_remove = cum_probs > torch.minimum(
+                    torch.ones_like(cum_probs), torch.exp(-entropy) * typical_p
+                )
+                
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                
+                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                logits[indices_to_remove] = -float('Inf')
+            
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, idx_next), dim=1)
+
+        return idx.to('cpu')
 
 # -----------------------------------------------------------------------------
 import tiktoken
@@ -340,10 +426,99 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
 enc = modified_tokenizer()
+device = 'mps'
+
+def load_checkpoint(path):
+        checkpoint = torch.load(path, map_location=torch.device(device), weights_only=False)
+        config = checkpoint['config']
+        model = GPT(config)
+        model.load_state_dict(checkpoint['model'])
+        return model, checkpoint['step']
+
+# -----------------------------------------------------------------------------
+sample_mode = '' # model_19072
+if len(sample_mode) > 0:
+    num_samples = 5 # number of samples to draw
+    temperature = 0.6
+    top_k = 256
+    top_p = 0.95
+    repetition_penalty = 1.2
+    max_new_tokens = 32 # number of tokens generated in each sample
+    model, _ = load_checkpoint(os.path.join(os.path.dirname(__file__), f"log/pt/{sample_mode}.pt"))
+    model.to(device)
+    print('Model parameters:', sum(p.numel() for p in model.parameters()))
+    while True:
+        user_input = input(">: ")
+        if user_input == "/exit":
+            exit(0)
+        
+        if user_input.startswith('/help'):
+            print("Commands:")
+            print("/nsamp <int>: set number of samples")
+            print("/temp <float>: set temperature")
+            print("/topk <int>: set top-k")
+            print("/topp <float>: set top-p")
+            print("/repen <float>: set repetition penalty")
+            print("/maxtok <int>: set max new tokens")
+            continue
+        
+        if user_input.startswith('/nsamp'):
+            try:
+                num_samples = int(user_input.split(' ')[1])
+                print(f"Number of samples set to {num_samples}")
+            except:
+                print(f"Invalid input. Number of samples remains at {num_samples}")
+            continue
+        if user_input.startswith('/temp'):
+            try:
+                temperature = float(user_input.split(' ')[1])
+                print(f"Temperature set to {temperature}")
+            except:
+                print(f"Invalid input. Temperature remains at {temperature}")
+            continue
+        if user_input.startswith('/topk'):
+            try:
+                top_k = int(user_input.split(' ')[1])
+                print(f"Top-k set to {top_k}")
+            except:
+                print(f"Invalid input. Top-k remains at {top_k}")
+            continue
+        if user_input.startswith('/topp'):
+            try:
+                top_p = float(user_input.split(' ')[1])
+                print(f"Top-p set to {top_p}")
+            except:
+                print(f"Invalid input. Top-p remains at {top_p}")
+            continue
+        if user_input.startswith('/repen'):
+            try:
+                repetition_penalty = float(user_input.split(' ')[1])
+                print(f"Repetition penalty set to {repetition_penalty}")
+            except:
+                print(f"Invalid input. Repetition penalty remains at {repetition_penalty}")
+            continue
+        if user_input.startswith('/maxtok'):
+            try:
+                max_new_tokens = int(user_input.split(' ')[1])
+                print(f"Max new tokens set to {max_new_tokens}")
+            except:
+                print(f"Invalid input. Max new tokens remains at {max_new_tokens}")
+            continue
+
+        now = time.time()
+        x = torch.tensor(enc.encode(user_input), dtype=torch.long, device=device).unsqueeze(0)
+        tokenization_time = time.time() - now
+        y = model.sample(x, max_new_tokens, temperature=temperature, top_k=top_k, top_p=top_p, repetition_penalty=repetition_penalty, num_samples=num_samples, device=device)
+        prediction_time = time.time() - now - tokenization_time
+        text = enc.decode(y[0].tolist())
+        decoding_time = time.time() - now - tokenization_time - prediction_time
+        print(text)
+        print(f"Time Metrics {tokenization_time + prediction_time + decoding_time:.2f}s, Tokenization {tokenization_time:.2f}s, Prediction {prediction_time:.2f}s, Decoding {decoding_time:.2f}s")
+    exit(0)
 
 total_batch_size = 524288 # 2**19, ~0.5M, in number of tokens
 B = 32 # micro batch size
-T = 2048 # sequence length
+T = 1024 # sequence length
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 if master_process:
@@ -429,7 +604,7 @@ for step in range(max_steps):
                 # you might also want to add optimizer.state_dict() and
                 # rng seeds etc., if you wanted to more exactly resume training
                 torch.save(checkpoint, checkpoint_path)
-
+    
     # once in a while evaluate hellaswag
     if (step % 250 == 0 or last_step) and (not use_compile):
         num_correct_norm = 0
