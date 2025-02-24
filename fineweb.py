@@ -4,7 +4,7 @@ https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu
 Downloads and tokenizes the data and saves data shards to disk.
 Run simply as:
 $ python fineweb.py
-Will save shards to the local directory "edu_fineweb10B".
+Will save shards to the local directory "fineweb10B".
 """
 
 import os
